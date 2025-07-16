@@ -1,0 +1,312 @@
+---
+title: "LEARN Assignment 3"
+author: "Chris LaGamba"
+date: 29 May 2025
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Code
+
+```{r code, include = TRUE, message = FALSE, warning = FALSE, results = FALSE}
+# ----------------------------
+# Environment Setup
+# ----------------------------
+# Load libraries
+library(tidyverse)
+library(caret)
+library(caretEnsemble)
+library(rpart)
+library(C50)
+library(gbm)
+library(randomForest)
+library(doParallel)
+library(pROC)
+
+# Load dataset
+cancer <- read.csv("dataR2.csv")
+
+
+# ----------------------------
+# Initial Data Inspection and Transformation
+# ----------------------------
+# Initial data inspection
+str(cancer)
+summary(cancer)
+colSums(is.na(cancer)) # no missing data
+
+# Convert outcome variable to factor format (1 = healthy, 2 = patient [cancer])
+cancer$Classification <- factor(cancer$Classification, levels = c(1, 2),
+                                labels = c("Healthy", "Patient"))
+
+# Confirm conversion and target variable class distribution
+str(cancer)
+table(cancer$Classification) # 52 healthy, 64 patient
+
+# Near-zero variance analysis
+nearZeroVar(cancer, saveMetrics = TRUE) # no nzv/zero-variance variables
+
+
+# ----------------------------
+# Train/Test Split
+# ----------------------------
+set.seed(500)
+trainIndex <- createDataPartition(cancer$Classification, p = 0.8, list = FALSE)
+train <- cancer[trainIndex, ]
+test <- cancer[-trainIndex, ]
+
+
+# ----------------------------
+# Training Controls
+# ----------------------------
+ctrl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats = 3,
+  savePredictions = "final",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  allowParallel = TRUE
+)
+
+
+# ----------------------------
+# Bagging Models (Untuned)
+# ----------------------------
+# Enable parellelization
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+# Treebag
+set.seed(500)
+tb_model <- train(Classification ~ .,
+                  data = train,
+                  method = "treebag",
+                  trControl = ctrl,
+                  metric = "ROC"
+                  )
+
+# Random forest (bagging with feature sampling)
+set.seed(500)
+rf_model <- train(Classification ~ .,
+                  data = train,
+                  method = "rf",
+                  trControl = ctrl,
+                  tuneLength = 5,
+                  metric = "ROC"
+                  )
+
+# Summarize results
+bagging_results <- resamples(list(treebag = tb_model, rf = rf_model))
+summary(bagging_results)
+dotplot(bagging_results)
+modelCor(bagging_results)
+splom(bagging_results)
+
+
+
+# ----------------------------
+# Boosting Models (Untuned)
+# ----------------------------
+# C5.0 Boosting
+set.seed(500)
+c50_model <- train(Classification ~ .,
+                   data = train,
+                   method = "C5.0",
+                   trControl = ctrl,
+                   tuneLength = 5,
+                   metric = "ROC"
+                   )
+
+# Gradient Boosting (GBM)
+set.seed(500)
+gbm_model <- train(Classification ~ .,
+                   data = train,
+                   method = "gbm",
+                   trControl = ctrl,
+                   verbose = FALSE,
+                   metric = "ROC"
+                   )
+
+# Summarize results
+boosting_results <- resamples(list(c50 = c50_model, gbm = gbm_model))
+summary(boosting_results)
+dotplot(boosting_results)
+modelCor(boosting_results)
+splom(boosting_results)
+
+
+# ----------------------------
+# Stacking Models (Untuned)
+# ----------------------------
+# First create candidate models for stacking
+stack_control <- trainControl(method = "repeatedcv",
+                              number = 10,
+                              repeats = 3,
+                              savePredictions = "final",
+                              classProbs = TRUE)
+
+# Create model list
+algorithms <- c("rf", "C5.0", "glm")  # RF, C5.0, and Logistic Regression
+
+set.seed(500)
+stack_models <- caretList(
+  Classification ~ .,
+  data = train,
+  trControl = stack_control,
+  methodList = algorithms,
+  metric = "ROC"
+)
+
+# Combine models with logistic regression meta-model
+set.seed(500)
+ensemble <- caretStack(
+  stack_models,
+  method = "glm",
+  metric = "ROC",
+  trControl = trainControl(
+    method = "boot",
+    number = 200,
+    savePredictions = "final",
+    classProbs = TRUE
+  )
+)
+
+stopImplicitCluster()
+
+# Summarize results
+print(stack_models)
+print(ensemble)
+summary(ensemble)
+dotplot(ensemble)
+```
+
+## Results
+
+```{r model evaluation, include = TRUE, message = FALSE, warning = FALSE}
+# ----------------------------
+# Model Evaluation (Untuned)
+# ----------------------------
+# Treebag
+pred_tb <- predict(tb_model, test, type = "prob")
+roc_tb <- roc(test$Classification, pred_tb$Patient)
+plot.roc(roc_tb, print.auc = TRUE, main = "Treebag")
+confusionMatrix(predict(tb_model, test), test$Classification,
+                mode = "everything", positive = "Patient")
+
+# Bagged RF
+pred_rf <- predict(rf_model, test, type = "prob")
+roc_rf <- roc(test$Classification, pred_rf$Patient)
+plot.roc(roc_rf, print.auc = TRUE, main = "Bagged Random Forest")
+confusionMatrix(predict(rf_model, test), test$Classification,
+                mode = "everything", positive = "Patient")
+
+# C5.0 Boosted
+pred_c50 <- predict(c50_model, test, type = "prob")
+roc_c50 <- roc(test$Classification, pred_c50$Patient)
+plot.roc(roc_c50, print.auc = TRUE, main = "C5.0 Boosted")
+confusionMatrix(predict(c50_model, test), test$Classification,
+                mode = "everything", positive = "Patient")
+
+# GBM
+pred_gbm <- predict(gbm_model, test, type = "prob")
+roc_gbm <- roc(test$Classification, pred_gbm$Patient)
+plot.roc(roc_gbm, print.auc = TRUE, main = "Gradient Boosting")
+confusionMatrix(predict(gbm_model, test), test$Classification,
+                mode = "everything", positive = "Patient")
+
+# Stack GLM
+pred_stack_glm <- predict(stack_models, test)
+roc_stack_glm <- roc(test$Classification, pred_stack_glm$glm)
+plot.roc(roc_stack_glm, print.auc = TRUE, main = "Stack GLM")
+confusionMatrix(predict(stack_models$glm, test), test$Classification,
+                mode = "everything", positive = "Patient")
+
+# Stack C5.0
+pred_stack_c50 <- predict(stack_models, test)
+roc_stack_c50 <- roc(test$Classification, pred_stack_c50$C5.0)
+plot.roc(roc_stack_c50, print.auc = TRUE, main = "Stack C5.0")
+confusionMatrix(predict(stack_models$C5.0, test), test$Classification,
+                mode = "everything", positive = "Patient")
+
+# Stack RF
+pred_stack_rf <- predict(stack_models, newdata = test)
+roc_stack_rf <- roc(test$Classification, pred_stack_rf$rf)
+plot.roc(roc_stack_rf, print.auc = TRUE, main = "Stack Random Forest")
+confusionMatrix(predict(stack_models$rf, test), test$Classification,
+                mode = "everything", positive = "Patient")
+
+# Stacked Ensemble
+pred_ensemble <- predict(ensemble, test)
+roc_ensemble <- roc(test$Classification, pred_ensemble$Patient)
+plot.roc(roc_ensemble, print.auc = TRUE, main = "Stacked Ensemble")
+
+ensemble_class <- ifelse(pred_ensemble$Patient > 0.5, "Patient", "Healthy")
+ensemble_class <- factor(ensemble_class, levels = levels(test$Classification))
+confusionMatrix(data = ensemble_class, reference = test$Classification,
+                mode = "everything", positive = "Patient")
+
+
+
+# Model comparison by summary table and visualization
+model_names <- c("Treebag", "RF", "C5.0", "GBM", "Stack_RF", "Stack_C50",
+                 "Stack_GLM", "Ensemble")
+auc_scores <- c(roc_tb$auc, roc_rf$auc, roc_c50$auc, roc_gbm$auc,
+                roc_stack_rf$auc, roc_stack_c50$auc, roc_stack_glm$auc,
+                roc_ensemble$auc)
+results <- data.frame(Model = model_names, AUC = auc_scores)
+results[order(-results$AUC), ]
+
+library(ggplot2)
+ggplot(results, aes(x = reorder(Model, AUC), y = AUC)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = round(AUC, 3)), hjust = -0.1) +
+  coord_flip(ylim = c(0.5, 1)) +
+  labs(title = "Model Performance Comparison", 
+       x = "Model", 
+       y = "ROC AUC") +
+  theme_minimal()
+
+
+# Check correlation between base model predictions
+cor_matrix <- cor(data.frame(
+  RF = predict(stack_models$rf, test, type = "prob")$Patient,
+  C50 = predict(stack_models$C5.0, test, type = "prob")$Patient,
+  GLM = predict(stack_models$glm, test, type = "prob")$Patient
+))
+print(cor_matrix)
+
+
+## Stacked GLM
+# Get probabilities
+probs <- predict(stack_models$glm, test, type = "prob")$Patient
+
+# Find optimal threshold
+roc_obj <- roc(test$Classification, probs)
+coords(roc_obj, "best", ret = "threshold", best.method = "youden")
+
+# Create confusion matrix at optimal threshold
+optimal_threshold <- coords(roc_obj, "best", ret = "threshold",
+                            best.method = "youden")$threshold
+pred_class <- ifelse(probs > optimal_threshold, "Patient", "Healthy") %>% 
+  factor(levels = levels(test$Classification))
+
+# Detailed performance
+confusionMatrix(pred_class, test$Classification, mode = "everything")
+```
+
+
+## Discussion
+
+The dataset was essentially clean with no need for data transformation apart from converting the target variable ("Classification") into factor with levels "Healthy" and "Patient" based on the description on the UCI Machine Learning website for this dataset. The data was split into train and test sets using a partition of 0.8. The individual models chosen were treebag, bagged random forest, C5.0 boosted, and gradient boosted (GBM). The stacked model (ensemble) was built using C5.0, random forest, and a generalized linear model (GLM) with a GLM meta-model. All models were trained with default hyperparameters to compare base performance.
+
+Base model performance showed similar performance among all models with AUC ranging from 0.742 with the GBM model to 0.833 with the stacked GLM model. The individual model with the best performance based on AUC was the C5.0 boosted model with an AUC of 0.783. The worst performing model was the GBM with an AUC of 0.742. An AUC of 0.70-0.79 suggests fair discrimination and moderate clinical value while an AUC of 0.80-0.89 suggests good discrimination and clinical utility. While the AUC can be suggestive of overall model performance, the real clinical utility is ascertained by testing the model performance on a validation test set and comparing the sensitivity, specificity, and F1 scores in a confusion matrix. This is particularly true in models that predict diseases such as cancer, as false positives can be costly in terms of emotional stress for the patient and in terms of testing to rule out cancer.
+
+The best performing model by AUC was the stacked GLM model. Looking at the confusion matrix, the stacked GLM had a specificity of 0.9 but a sensitivity of 0.6667 with an F1 score of 0.7619. This indicates the stacked GLM model correctly guessed only two-thirds of the actual cancer cases in the validation test set. This is extremely costly as there are 4 patients with a missed breast cancer diagnosis. A specificity of 0.9 indicates that the model correctly identified 9 out of 10 patients as not having cancer. The worst performing model based on AUC was the GBM model. On confusion matrix, this model had a sensitivity of 0.5833, a specificity of 0.8, and an F1 of 0.6667. This model correctly identified 7 out of 12 positive breast cancer diagnoses. Additionally, the model incorrectly identified 2 healthy patients has having breast cancer. Interestingly, the remaining models had similar results with the exception of the C5.0 boosted model. Despite having the best AUC of the individual models, the confusion matrix showed the model correctly identifying 8 out of 12 positive breast cancer patients (sensitivity = 0.6667) and incorrectly identifying 3 healthy patients as having breast cancer (specificity = 0.7). The F1 score was 0.6957. Also of note was the treebag model's confusion matrix performance. 
+
+Interestingly, the stacked ensemble model (stacked GLM, C5.0, and random forest) had an AUC 0f 0.775 while the stacked GLM model had an AUC of 0.833, indicating that the stacked GLM model outperformed the ensemble model. This indicates that better model diversity is needed to improve the stacked ensemble model performance. This is also apparent when checking the correlations between the stacked models. The correlation between the stacked random forest and stacked C5.0 models is about 0.914 while the correlation between the stacked C5.0 and stacked GLM models is 0.782 and the correlation between the stacked random forest and stacked GLM models is 0.789. Changing either the stacked random forest or stacked C5.0 models for another model, such as a support vector machine, may result in better performance of the ensemble model provided the correlation between the new and existing models is not high (greater than or equal to 0.8).
+
+The results of the "base" models with default hyperparameters displays model performance at detecting breast cancer without tuning. All models with the exception of the treebag model have the ability to have their hyperparameters tuned to improve model performance. This work shows that the treebag model is not ideal for detecting breast cancer when trained with this specific dataset. Future treebag models trained with a more robust dataset (e.g., more patients with additional clinically relevant variables) may have better discernment. Future work could be done to tune the hyperparameters of the remaining models to determine optimal tuning for best performance based on this specific dataset. 
