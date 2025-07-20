@@ -1,0 +1,196 @@
+# Load required libraries
+library(arules)
+library(arulesViz)  # For visualization of association rules
+library(cluster)    # For clustering algorithms
+library(factoextra) # For clustering visualization
+library(FactoMineR)
+library(ggplot2)    # For general plotting
+library(tidyverse)
+library(summarytools)
+library(doParallel)
+library(DiAna)
+
+
+# ---------------------------
+# Load and Inspect the Dataset
+# ---------------------------
+# Load dataset
+cc_risk <- read.csv("risk_factors_cervical_cancer.csv",
+                    na.strings = "?",
+                    stringsAsFactors = FALSE)
+View(cc_risk)
+
+# Initial exploration
+str(cc_risk)
+summary(cc_risk)
+
+# In-depth data inspection with dfSummary
+dfSummary(cc_risk)
+# "STDsTimesince" variables missing 91.7%; several others missing ~12.2-13.6%
+
+
+# ----------------------------
+# Data Cleaning
+# ----------------------------
+# Clean up column names to avoid errors
+column_names <- colnames(cc_risk)
+names(cc_risk) <- gsub("\\.", "", names(cc_risk))
+cleaned_column_names <- colnames(cc_risk)
+print(column_names)
+print(cleaned_column_names)
+rm(column_names, cleaned_column_names) # clean up of environment
+
+# Remove variables with excessive missingness (>90%)
+cc_risk <- cc_risk %>%
+  select(-STDsTimesincefirstdiagnosis, -STDsTimesincelastdiagnosis)
+
+# Convert integers to numeric
+cc_risk$Age <- as.numeric(cc_risk$Age)
+cc_risk$STDsNumberofdiagnosis <- as.numeric(cc_risk$STDsNumberofdiagnosis)
+str(cc_risk)
+
+# Select binary variables and convert to factor
+binary_vars <- c("Smokes", "HormonalContraceptives", "STDsHepatitisB",
+                 "STDscondylomatosis", "STDscervicalcondylomatosis", "STDs",
+                 "STDsvaginalcondylomatosis", "STDssyphilis", "DxHPV",
+                 "STDsvulvoperinealcondylomatosis", "STDsAIDS", "IUD",
+                 "DxCancer", "STDspelvicinflammatorydisease", "DxCIN", "Dx",
+                 "STDsmolluscumcontagiosum", "STDsHIV", "STDsHPV", "Biopsy",
+                 "Hinselmann", "STDsgenitalherpes", "Schiller", "Citology")
+
+cc_risk[binary_vars] <- lapply(
+  cc_risk[binary_vars],
+  function(x) {
+               factor(x, levels = c(0, 1), labels = c("No", "Yes"))})
+str(cc_risk)
+
+# Omit NAs and compare new dataset to old
+cc_risk_omit <- na.omit(cc_risk)
+View(cc_risk_omit) # 668 entries compared to initial 858
+summary(cc_risk)
+summary(cc_risk_omit) # data spread still present
+
+
+# ---------------------------
+# Association Rules Analysis
+# (For binary/categorical variables)
+# ---------------------------
+# Select binary/categorical variables and convert to transactions format
+binary_vars_df <- cc_risk_omit[, binary_vars]
+View(binary_vars_df)
+transactions <- as(binary_vars_df, "transactions")
+
+# Enable parellization
+cl <- makeCluster(10)
+registerDoParallel(cl)
+
+# Generate association rules
+rules <- apriori(transactions,
+                 parameter = list(supp = 0.7,  # controls frequency of patterns
+                                  conf = 0.8,  # strength of relationships
+                                  minlen = 3,  # number of items per rule
+                                  target = "rules"))
+                 # appearance = list(rhs = c("DxCancer=Yes"),
+                 #                   default = "lhs"))
+
+# Inspect and sort rules
+lift_rules <- sort(rules, by = "lift", decreasing = TRUE)
+inspect(lift_rules[1:20])
+# lift = 1 independent, > 1 positive association, < 1 negative association
+
+## Visualize rules
+# # Scatter plot
+# plot(rules, main = "Association Rules: Support vs Confidence",
+#      jitter = 0)
+
+# Grouped plot for top 20 rules
+top_rules <- head(sort(rules, by = "lift"), 20)
+plot(top_rules, method = "graph",
+     engine = "igraph",
+     main = "Top 20 Rules by Lift",
+     jitter = 0)
+
+# Graph plot for top 10 rules
+plot(top_rules[1:10], method = "graph", 
+     engine = "igraph",
+     main = "Rule Network Diagram",
+     control = list(
+       type = "items",
+       cex = 0.8,  # Font size
+       alpha = 0.7  # Transparency
+     ))
+
+# Focus on cancer rules
+cancer_rules <- subset(rules, rhs %pin% "DxCancer")
+
+# Grouped plot for top 10 cancer rules
+plot(cancer_rules[1:10], method = "graph",
+     engine = "igraph",
+     main = "Top 10 Cervical Cancer Rules by Lift",
+     jitter = 0)
+
+# View top DxCancer rules by lift and confidence
+inspect(sort(cancer_rules, by = "lift", decreasing = TRUE)[1:10])
+inspect(sort(cancer_rules, by = "confidence", decreasing = TRUE)[1:10])
+
+stopImplicitCluster()
+
+
+# ---------------------------
+# Clustering Analysis (For continuous variables)
+# ---------------------------
+# Enable parellization
+cl <- makeCluster(10)
+registerDoParallel(cl)
+
+# Select continuous variables
+continuous_vars <- cc_risk[, c("Age", "Numberofsexualpartners", "Smokesyears",
+                               "Numofpregnancies", "STDsNumberofdiagnosis",
+                               "HormonalContraceptivesyears", "Smokespacksyear",
+                               "Firstsexualintercourse", "STDsnumber",
+                               "IUDyears")]
+
+# Omit NA values
+continuous_vars <- na.omit(continuous_vars)
+colSums(is.na(continuous_vars))
+
+# Create cancer status annotation
+cc_risk_omit$DxCancer <- as.numeric(cc_risk_omit$DxCancer)-1
+
+cancer_annotation <- data.frame(
+  DxCancer = ifelse(cc_risk_omit$DxCancer == 1, "Cancer", "No Cancer"),
+  row.names = rownames(cc_risk_omit)
+)
+
+# Normalize data for k-means
+scaled_data <- scale(continuous_vars)
+
+
+# Determine optimal number of clusters using elbow method
+fviz_nbclust(scaled_data, kmeans, method = "wss") +
+  geom_vline(xintercept = 3, linetype = 2)
+
+# Perform k-means clustering (k=3 example)
+set.seed(300)
+kmeans_clust <- kmeans(scaled_data, centers = 3)
+fviz_cluster(kmeans_clust, data = scaled_data, main = "K3-Means Clustering")
+
+# Hierarchical clustering
+dist_matrix <- dist(scaled_data)
+hc <- hclust(dist_matrix, method = "single")
+plot(hc, labels = FALSE, main = "Agglomerative Clustering - Single Structure")
+rect.hclust(hc, k = 3, border = 2:4)
+
+# Hierarchical clustering using average linkage
+hc_avg <- hclust(dist_matrix, method = "average")
+hc_avg$labels <- as.character(cc_risk_omit$DxCancer)
+plot(hc_avg, main = "Agglomerative Clustering - Average Linkage", xlab = "",
+     sub = "", cex = 0.7)
+rect.hclust(hc_avg, k = 3)
+
+# Divisive clustering
+div <- diana(cc_risk_omit)
+plot(div, main = "DiAna on Cervical Cancer Risk Factor Data (Top-Down)")
+
+
+stopImplicitCluster()
