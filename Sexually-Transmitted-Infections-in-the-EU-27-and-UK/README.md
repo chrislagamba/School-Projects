@@ -1,6 +1,6 @@
 # Introduction
 
-This is a **README** file for the DATA folder. This folder contains a single project that was 75% of my final grade for the course. This was a group project completed with two other classmates and was the first significant project we were assigned in the program. The purpose of the project was to get hands-on exposure to R, RStudio, data cleaning, exploratory data analysis, data visualization, and presentation of relevant findings.
+This folder contains a single project that was 75% of my final grade for my DATA course in my Health Data Science program. This was a group project completed with two other classmates and was the first significant project we were assigned in the program. The purpose of the project was to get hands-on exposure to R, RStudio, data cleaning, exploratory data analysis, data visualization, and presentation of relevant findings.
 
 ## Assignment Instructions
 
